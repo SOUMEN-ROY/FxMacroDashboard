@@ -3,7 +3,12 @@ import pandas as pd
 import yfinance as yf
 from fredapi import Fred
 import plotly.express as px
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+import numpy as np
 import time
+import os
+import joblib
 
 # ==============================
 # 🔑 CONFIG
@@ -150,6 +155,71 @@ def generate_signals(df, fx_pair, macro_var, window=30, threshold=0.3):
 
     return df, best_lag
 
+def create_dataset(df, window):
+    X, y, dates = [], [], []
+
+    features_cols = ["GBPUSD", "CPI", "UNRATE", "FEDRATE"]
+
+    for i in range(window, len(df)-1):
+        window_data = df.iloc[i-window:i]
+
+        features = window_data[features_cols].values.flatten()
+
+        X.append(features)
+        y.append(df.iloc[i]["target"])
+        dates.append(df.index[i])
+
+    return np.array(X), np.array(y), dates
+
+def generate_NN_signals(df,WINDOW=252):
+    df["target"] = df["GBPUSD"].shift(-1)
+
+    X, y, dates = create_dataset(df, WINDOW)
+
+    X_train, X_test, y_train, y_test, dates_train, dates_test = train_test_split(
+    X, y, dates, test_size=0.2, shuffle=False
+    )
+
+    if os.path.exists("fx_model.pkl"):
+        model = joblib.load("fx_model.pkl")
+        print("Loaded cached model")
+    else:
+        model = GradientBoostingRegressor(
+            n_estimators=150,
+            learning_rate=0.05,
+            max_depth=3
+        )
+        model.fit(X_train, y_train)
+        joblib.dump(model, "fx_model.pkl")
+        print("Trained and saved model")
+
+    pred_train = model.predict(X_train)
+    pred_test = model.predict(X_test)
+
+    results = pd.DataFrame({
+        "date": dates_train + dates_test,
+        "pred_return": np.concatenate([pred_train, pred_test])
+    })
+
+    upper = results["pred_return"].quantile(0.6)
+    lower = results["pred_return"].quantile(0.4)
+
+    def signal(x):
+        if x > upper:
+            return "BUY"
+        elif x < lower:
+            return "SELL"
+        else:
+            return "HOLD"
+
+
+    results["signal"] = results["pred_return"].apply(signal)
+
+    prices = fx.reset_index()
+    prices = prices.rename(columns={prices.columns[0]: "date"})
+
+    plot_df = results.merge(prices[["date", "GBPUSD"]], on="date", how="left")
+    return plot_df
 
 # ==============================
 # 🚀 STREAMLIT APP
@@ -185,6 +255,7 @@ macro_var = st.sidebar.selectbox("Macro Variable", ["CPI", "UNRATE", "FEDRATE"])
 window = st.sidebar.slider("Rolling Window (days)", 10, 120, 30)
 threshold = st.sidebar.slider("Correlation Threshold", 0.0, 1.0, 0.3)
 
+plot_df = generate_NN_signals(df)
 window = min(window, len(df) - 1)
 
 df, signal_lag = generate_signals(df, fx_pair, macro_var, window, threshold)
@@ -200,7 +271,7 @@ fig_fx = px.line(
     title=f"{fx_pair} Spot Rate",
 )
 
-st.plotly_chart(fig_fx, use_container_width=True)
+st.plotly_chart(fig_fx, width='stretch')
 
 # ==============================
 # 📈 ROLLING CORRELATION
@@ -215,7 +286,7 @@ fig1 = px.line(
     title=f"{fx_pair} vs {macro_var} (Rolling {window}d)",
 )
 
-st.plotly_chart(fig1, use_container_width=True)
+st.plotly_chart(fig1, width='stretch')
 
 # ==============================
 # ⏳ LAG ANALYSIS
@@ -232,7 +303,7 @@ fig2 = px.bar(
     title="Lagged Correlation",
 )
 
-st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, width='stretch')
 
 # ==============================
 # 🔥 HEATMAP
@@ -248,7 +319,7 @@ fig3 = px.imshow(
     title="Correlation Matrix",
 )
 
-st.plotly_chart(fig3, use_container_width=True)
+st.plotly_chart(fig3, width='stretch')
 
 # ==============================
 # 📊 FX vs Macro Overlay
@@ -262,7 +333,7 @@ fig4 = px.line(
     title=f"{fx_pair} vs {macro_var}",
 )
 
-st.plotly_chart(fig4, use_container_width=True)
+st.plotly_chart(fig4, width='stretch')
 
 # ==============================
 # 🧠 INSIGHTS
@@ -311,9 +382,35 @@ fig_signal.add_scatter(
     marker=dict(symbol="triangle-down", size=10),
 )
 
-st.plotly_chart(fig_signal, use_container_width=True)
+st.plotly_chart(fig_signal, width='stretch')
 
 st.subheader("📌 Signal Summary")
 
 st.write(f"Best macro lag used: **{signal_lag} days**")
 st.write(df["Signal"].value_counts())
+
+st.subheader("📍 NN Trading Signals")
+
+fig_NN_sig = px.line(
+    plot_df,
+    x="date",
+    y="GBPUSD",
+    title=f"FX Signals (Source: {fx_source})"
+)
+
+fig_NN_sig.add_scatter(
+    x=plot_df["date"],
+    y=plot_df["GBPUSD"],
+    mode="markers",
+    marker=dict(
+        color=plot_df["signal"].map({
+            "BUY": "green",
+            "SELL": "red",
+            "HOLD": "gray"
+        }),
+        size=8
+    ),
+    name="Signals"
+)
+
+st.plotly_chart(fig_NN_sig, width='stretch')

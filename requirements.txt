@@ -3,3 +3,4 @@ streamlit
 yfinance
 fredapi
 plotly
+scikit-learn
